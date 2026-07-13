@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Route Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#191919;
+    --panel:#202020;
+    --line:#373737;
+    --red:#ff4433;
+    --red-dim:#7a241c;
+    --text:#eceae7;
+    --muted:#9b9b9b;
+    --start:#3ddc84;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;}
+  #app{max-width:1100px;margin:0 auto;padding:28px 20px 40px;}
+
+  .stats{display:flex;gap:36px;flex-wrap:wrap;margin-bottom:20px;}
+  .stat .num{font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:34px;line-height:1;color:var(--text);}
+  .stat .lbl{font-size:11px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase;margin-top:4px;}
+
+  .toolbar{display:flex;align-items:center;gap:12px;margin-bottom:16px;}
+  .toolbar label.upload{
+    font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--text);
+    background:var(--panel);border:1px solid var(--line);padding:8px 14px;border-radius:4px;
+    cursor:pointer;transition:border-color .15s;
+  }
+  .toolbar label.upload:hover{border-color:var(--red);}
+  .toolbar input[type=file]{display:none;}
+  .toolbar .fname{font-size:12px;color:var(--muted);}
+
+  #map{height:440px;border-radius:8px;border:1px solid var(--line);background:#0f0f0f;}
+
+  .elev-wrap{margin-top:2px;background:var(--panel);border:1px solid var(--line);border-top:none;border-radius:0 0 8px 8px;padding:14px 18px 10px;position:relative;}
+  .elev-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;}
+  .elev-head h3{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:0;}
+  .elev-head span{font-size:11px;color:var(--muted);}
+
+  svg#chart{width:100%;height:150px;display:block;overflow:visible;}
+  .tooltip{
+    position:absolute;pointer-events:none;background:#1a1a1d;border:1px solid var(--line);
+    border-radius:5px;padding:6px 10px;font-size:12px;color:var(--text);white-space:nowrap;
+    transform:translate(-50%,-115%);opacity:0;transition:opacity .1s;
+  }
+  .tooltip b{color:var(--red);}
+  .leaflet-control-attribution{background:rgba(10,10,11,.7)!important;color:var(--muted)!important;font-size:10px;}
+  .leaflet-control-attribution a{color:var(--muted)!important;}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="stats" id="statsRow"></div>
+
+  <div class="toolbar">
+    <label class="upload">Load GPX file
+      <input type="file" id="gpxInput" accept=".gpx">
+    </label>
+    <span class="fname" id="fname">Showing sample route — load your own GPX to replace it</span>
+  </div>
+
+  <div id="map"></div>
+  <div class="elev-wrap">
+    <div class="elev-head">
+      <h3>Elevation Profile</h3>
+      <span>Hover to trace the course</span>
+    </div>
+    <svg id="chart" viewBox="0 0 1000 150" preserveAspectRatio="none"></svg>
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const R = 6371000;
+function haversine(a,b){
+  const toRad = d=>d*Math.PI/180;
+  const dLat = toRad(b[0]-a[0]), dLon = toRad(b[1]-a[1]);
+  const s = Math.sin(dLat/2)**2 + Math.cos(toRad(a[0]))*Math.cos(toRad(b[0]))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+
+// ---- Sample route (placeholder) — a synthetic looped trail with a real hill profile ----
+function sampleRoute(){
+  const pts = [];
+  const baseLat = 22.42, baseLng = 114.18;
+  const n = 220;
+  for(let i=0;i<n;i++){
+    const t = i/(n-1);
+    const lat = baseLat + 0.075*Math.sin(t*6.1)*Math.exp(-t*0.4) + 0.05*t - 0.03;
+    const lng = baseLng + 0.11*t + 0.03*Math.sin(t*10) - 0.02*Math.cos(t*4);
+    const ele = 40
+      + 90*Math.max(0,Math.sin(t*7))
+      + 160*Math.max(0,Math.sin((t-0.42)*5.2))
+      + 60*Math.max(0,Math.sin((t-0.75)*9))
+      + 12*Math.sin(t*40);
+    pts.push([lat,lng,Math.round(ele)]);
+  }
+  return pts;
+}
+
+function parseGPX(text){
+  const doc = new DOMParser().parseFromString(text,'application/xml');
+  const trkpts = [...doc.getElementsByTagName('trkpt')];
+  if(!trkpts.length) throw new Error('No track points found in this GPX file');
+  return trkpts.map(pt=>{
+    const lat = parseFloat(pt.getAttribute('lat'));
+    const lon = parseFloat(pt.getAttribute('lon'));
+    const eleNode = pt.getElementsByTagName('ele')[0];
+    const ele = eleNode ? parseFloat(eleNode.textContent) : 0;
+    return [lat,lon,ele];
+  });
+}
+
+function withDistance(points){
+  let d = 0;
+  return points.map((p,i)=>{
+    if(i>0) d += haversine(points[i-1],p);
+    return {lat:p[0], lng:p[1], ele:p[2], dist:d};
+  });
+}
+
+let map, routeLine, startMarker, finishMarker, hoverMarker, data=[];
+
+function initMap(){
+  map = L.map('map',{zoomControl:true, attributionControl:true}).setView([22.4,114.2],11);
+  const tiles = L.tileLayer('https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{
+    attribution:'&copy; Esri, HERE, Garmin, OpenStreetMap contributors',
+    maxZoom:16, minZoom:2
+  }).addTo(map);
+  let tileErrors = 0;
+  tiles.on('tileerror', ()=>{
+    tileErrors++;
+    if(tileErrors===6){
+      document.getElementById('fname').textContent += ' — map tiles failed to load (check your network/firewall)';
+    }
+  });
+}
+
+function render(points){
+  data = withDistance(points);
+  const latlngs = data.map(p=>[p.lat,p.lng]);
+
+  if(routeLine) map.removeLayer(routeLine);
+  if(startMarker) map.removeLayer(startMarker);
+  if(finishMarker) map.removeLayer(finishMarker);
+  if(hoverMarker) map.removeLayer(hoverMarker);
+
+  routeLine = L.polyline(latlngs,{color:'#ff4433', weight:3.5, opacity:0.95}).addTo(map);
+  map.fitBounds(routeLine.getBounds(),{padding:[30,30]});
+
+  startMarker = L.circleMarker(latlngs[0],{radius:7,color:'#0a0a0b',weight:2,fillColor:'#3ddc84',fillOpacity:1}).addTo(map);
+  finishMarker = L.circleMarker(latlngs[latlngs.length-1],{radius:7,color:'#0a0a0b',weight:2,fillColor:'#ffffff',fillOpacity:1}).addTo(map);
+  hoverMarker = L.circleMarker(latlngs[0],{radius:5.5,color:'#fff',weight:2,fillColor:'#ff4433',fillOpacity:1}).addTo(map);
+  hoverMarker.setStyle({opacity:0, fillOpacity:0});
+
+  drawChart();
+  drawStats();
+}
+
+function drawStats(){
+  const totalDist = data[data.length-1].dist/1000;
+  let gain=0;
+  for(let i=1;i<data.length;i++){ const d=data[i].ele-data[i-1].ele; if(d>0) gain+=d; }
+  const maxEle = Math.max(...data.map(p=>p.ele));
+  document.getElementById('statsRow').innerHTML = `
+    <div class="stat"><div class="num">${totalDist.toFixed(1)} KM</div><div class="lbl">Distance</div></div>
+    <div class="stat"><div class="num">${Math.round(gain)} M</div><div class="lbl">Total Climb</div></div>
+    <div class="stat"><div class="num">${Math.round(maxEle)} M</div><div class="lbl">Max Elevation</div></div>
+  `;
+}
+
+function drawChart(){
+  const svg = document.getElementById('chart');
+  const W=1000,H=150,padB=18,padT=10;
+  const dists = data.map(p=>p.dist);
+  const eles = data.map(p=>p.ele);
+  const maxD = dists[dists.length-1], minE = Math.min(...eles), maxE = Math.max(...eles);
+  const xs = d => (d/maxD)*W;
+  const ys = e => H-padB - ((e-minE)/(maxE-minE||1))*(H-padB-padT);
+
+  let line = `M0,${ys(eles[0]).toFixed(1)}`;
+  data.forEach(p=>{ line += ` L${xs(p.dist).toFixed(1)},${ys(p.ele).toFixed(1)}`; });
+  let area = line + ` L${W},${H} L0,${H} Z`;
+
+  svg.innerHTML = `
+    <defs>
+      <linearGradient id="fillGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#ff4433" stop-opacity="0.55"/>
+        <stop offset="100%" stop-color="#ff4433" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <path d="${area}" fill="url(#fillGrad)"></path>
+    <path d="${line}" fill="none" stroke="#ff5b46" stroke-width="1.6"></path>
+    <line id="hoverLine" x1="0" y1="0" x2="0" y2="${H}" stroke="#ffffff" stroke-width="1" stroke-dasharray="3,3" opacity="0"></line>
+    <circle id="hoverDot" r="4" fill="#fff" stroke="#ff4433" stroke-width="2" opacity="0"></circle>
+    <rect id="hitArea" x="0" y="0" width="${W}" height="${H}" fill="transparent"></rect>
+  `;
+
+  const hitArea = svg.getElementById('hitArea');
+  const hoverLine = svg.getElementById('hoverLine');
+  const hoverDot = svg.getElementById('hoverDot');
+  const tooltip = document.getElementById('tooltip');
+  const wrap = document.querySelector('.elev-wrap');
+
+  function updateAt(clientX){
+    const rect = svg.getBoundingClientRect();
+    let frac = (clientX - rect.left) / rect.width;
+    frac = Math.max(0, Math.min(1, frac));
+    const targetDist = frac * maxD;
+    // nearest point
+    let idx = 0, best = Infinity;
+    for(let i=0;i<data.length;i++){
+      const diff = Math.abs(data[i].dist - targetDist);
+      if(diff < best){ best = diff; idx = i; }
+    }
+    const p = data[idx];
+    const px = xs(p.dist), py = ys(p.ele);
+    hoverLine.setAttribute('x1',px); hoverLine.setAttribute('x2',px); hoverLine.setAttribute('opacity',1);
+    hoverDot.setAttribute('cx',px); hoverDot.setAttribute('cy',py); hoverDot.setAttribute('opacity',1);
+
+    hoverMarker.setLatLng([p.lat,p.lng]);
+    hoverMarker.setStyle({opacity:1, fillOpacity:1});
+
+    const wrapRect = wrap.getBoundingClientRect();
+    tooltip.style.left = (clientX - wrapRect.left) + 'px';
+    tooltip.style.top = (py/H*150) + 'px';
+    tooltip.style.opacity = 1;
+    tooltip.innerHTML = `<b>${(p.dist/1000).toFixed(1)} km</b> · ${Math.round(p.ele)} m`;
+  }
+
+  function hide(){
+    hoverLine.setAttribute('opacity',0);
+    hoverDot.setAttribute('opacity',0);
+    tooltip.style.opacity = 0;
+    hoverMarker.setStyle({opacity:0, fillOpacity:0});
+  }
+
+  hitArea.addEventListener('mousemove', e=>updateAt(e.clientX));
+  hitArea.addEventListener('mouseleave', hide);
+  hitArea.addEventListener('touchmove', e=>{ updateAt(e.touches[0].clientX); e.preventDefault(); }, {passive:false});
+  hitArea.addEventListener('touchend', hide);
+}
+
+document.getElementById('gpxInput').addEventListener('change', e=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ev=>{
+    try{
+      const pts = parseGPX(ev.target.result);
+      render(pts);
+      document.getElementById('fname').textContent = 'Showing: ' + file.name;
+    }catch(err){
+      alert('Could not read that GPX file: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+});
+
+initMap();
+render(sampleRoute());
+</script>
+</body>
+</html>
